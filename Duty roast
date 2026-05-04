@@ -1,0 +1,248 @@
+import { useState, useEffect } from "react";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+
+const bsMonths = [
+  "Baisakh","Jestha","Ashad","Shrawan","Bhadra","Ashwin",
+  "Kartik","Mangsir","Poush","Magh","Falgun","Chaitra"
+];
+
+const bsMonthDays2083 = [31,31,32,31,31,30,30,30,29,30,29,30];
+const startWeekday2083 = 2;
+const weekDays = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+
+function generateBSMonth(year, monthIndex) {
+  const days = [];
+  const totalDays = bsMonthDays2083[monthIndex];
+
+  let startDay = startWeekday2083;
+  for (let i = 0; i < monthIndex; i++) {
+    startDay = (startDay + bsMonthDays2083[i]) % 7;
+  }
+
+  const startAD = new Date(2026, 3, 14);
+  let adOffset = 0;
+  for (let i = 0; i < monthIndex; i++) {
+    adOffset += bsMonthDays2083[i];
+  }
+
+  for (let i = 0; i < totalDays; i++) {
+    const d = new Date(startAD);
+    d.setDate(startAD.getDate() + adOffset + i);
+
+    days.push({
+      bsDate: `${year}-${String(monthIndex + 1).padStart(2, "0")}-${String(i + 1).padStart(2, "0")}`,
+      adDate: d.toISOString().slice(0, 10),
+      day: weekDays[(startDay + i) % 7],
+      morning: [],
+      night: [],
+      off: [],
+    });
+  }
+
+  return days;
+}
+
+function getHours(range) {
+  try {
+    const [start, end] = range.split("-").map(s => s.trim());
+    const [sh, sm] = start.split(":").map(Number);
+    const [eh, em] = end.split(":").map(Number);
+    let startMin = sh * 60 + sm;
+    let endMin = eh * 60 + em;
+    if (endMin < startMin) endMin += 24 * 60;
+    return (endMin - startMin) / 60;
+  } catch {
+    return 0;
+  }
+}
+
+export default function DutyRosterApp() {
+  const [year] = useState(2083);
+  const [month, setMonth] = useState(0);
+
+  const [staff, setStaff] = useState(() => JSON.parse(localStorage.getItem("staff")) || []);
+  const [newName, setNewName] = useState("");
+
+  const [shiftTimes, setShiftTimes] = useState(() => {
+    return JSON.parse(localStorage.getItem("shiftTimes")) || {
+      morning: "06:00 - 14:00",
+      night: "14:00 - 22:00",
+    };
+  });
+
+  const [roster, setRoster] = useState(() => generateBSMonth(2083, 0));
+
+  useEffect(() => {
+    setRoster(generateBSMonth(year, month));
+  }, [month, year]);
+
+  const addStaff = () => {
+    if (newName && !staff.includes(newName)) {
+      setStaff([...staff, newName]);
+      setNewName("");
+    }
+  };
+
+  const removeFromShift = (index, field, name) => {
+    const updated = [...roster];
+    updated[index][field] = updated[index][field].filter(n => n !== name);
+    setRoster(updated);
+  };
+
+  const toggleAssign = (index, field, name) => {
+    if (!name) return;
+    const updated = [...roster];
+
+    if (field === "off") {
+      updated[index].morning = updated[index].morning.filter(n => n !== name);
+      updated[index].night = updated[index].night.filter(n => n !== name);
+    }
+
+    if (field !== "off" && updated[index].off.includes(name)) return;
+
+    if (!updated[index][field].includes(name)) {
+      updated[index][field].push(name);
+    }
+
+    setRoster(updated);
+  };
+
+  // 🧠 Dashboard calculations
+  const getWeeklyHours = (name, weekIndex) => {
+    const mH = getHours(shiftTimes.morning);
+    const nH = getHours(shiftTimes.night);
+    let total = 0;
+
+    roster.slice(weekIndex * 7, weekIndex * 7 + 7).forEach(day => {
+      if (day.morning.includes(name)) total += mH;
+      if (day.night.includes(name)) total += nH;
+    });
+
+    return total;
+  };
+
+  const getTotalHours = (name) => {
+    let total = 0;
+    for (let w = 0; w < 5; w++) {
+      total += getWeeklyHours(name, w);
+    }
+    return total;
+  };
+
+  const smartAutoAssign = () => {
+    if (staff.length === 0) return;
+    const updated = [...roster];
+
+    updated.forEach((day, i) => {
+      day.morning = [];
+      day.night = [];
+      day.off = [];
+
+      if (day.day === "Saturday") {
+        day.off.push("Rajina");
+      } else {
+        day.morning = ["Rajina"];
+      }
+
+      staff.filter(s => s !== "Rajina").forEach((s, idx) => {
+        const weekIndex = Math.floor(i / 7);
+        const hours = getWeeklyHours(s, weekIndex);
+
+        if (hours >= 36) return;
+
+        if (idx % 2 === 0 && day.morning.length < 2) {
+          if (!day.off.includes(s)) day.morning.push(s);
+        } else if (day.night.length < 2) {
+          if (!day.off.includes(s)) day.night.push(s);
+        }
+      });
+    });
+
+    setRoster(updated);
+  };
+
+  // 📄 FIXED PDF DOWNLOAD
+  const downloadPDF = () => {
+    const doc = new jsPDF();
+
+    doc.text("Duty Roster", 14, 10);
+
+    autoTable(doc, {
+      startY: 20,
+      head: [["BS Date", "Day", "Morning", "Night", "Off"]],
+      body: roster.map(r => [
+        r.bsDate,
+        r.day,
+        r.morning.join(", "),
+        r.night.join(", "),
+        r.off.join(", ")
+      ])
+    });
+
+    doc.save("Duty_Roster.pdf");
+  };
+
+  return (
+    <div className="p-6 bg-gray-50 min-h-screen">
+      <h1 className="text-3xl font-bold mb-4">Hospital Duty Dashboard</h1>
+
+      {/* Dashboard */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        {staff.map((s,i)=>{
+          const total = getTotalHours(s);
+          const color = total > 36 ? "bg-red-200" : total < 36 ? "bg-yellow-200" : "bg-green-200";
+          return (
+            <div key={i} className={`p-3 rounded shadow ${color}`}>
+              <div className="font-bold">{s}</div>
+              <div>{total} hrs</div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mb-4 flex gap-2">
+        <select value={month} onChange={(e)=>setMonth(Number(e.target.value))} className="border p-2">
+          {bsMonths.map((m,i)=>(<option key={i} value={i}>{m}</option>))}
+        </select>
+
+        <button onClick={smartAutoAssign} className="bg-green-600 text-white px-3 py-2">Smart Assign</button>
+        <button onClick={downloadPDF} className="bg-red-600 text-white px-3 py-2">Download PDF</button>
+      </div>
+
+      <div className="overflow-auto bg-white shadow rounded">
+        <table className="table-auto w-full text-sm">
+          <thead className="bg-gray-200">
+            <tr>
+              <th>BS</th><th>Day</th><th>Morning</th><th>Night</th><th>Off</th>
+            </tr>
+          </thead>
+          <tbody>
+            {roster.map((r,i)=>(
+              <tr key={i} className="border-t">
+                <td>{r.bsDate}</td>
+                <td>{r.day}</td>
+                {["morning","night","off"].map(f=>(
+                  <td key={f}>
+                    <div className="flex flex-wrap gap-1">
+                      {r[f].map((name, idx) => (
+                        <span key={idx} className="bg-blue-200 px-2 py-1 rounded text-xs flex items-center gap-1">
+                          {name}
+                          <button onClick={() => removeFromShift(i, f, name)} className="text-red-600">×</button>
+                        </span>
+                      ))}
+                    </div>
+                    <select onChange={(e)=>toggleAssign(i,f,e.target.value)} className="border mt-1 w-full">
+                      <option value="">Add</option>
+                      {staff.map((s,idx)=>(<option key={idx}>{s}</option>))}
+                    </select>
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
